@@ -224,19 +224,67 @@ mem > 5 and cpu > 10              # Memory and CPU intensive processes
 
 ## Building
 
+### Quick Build
+
 ```bash
-# Build
+# Build for current platform
 make build
 
-# Run
+# Build and run
 make run
 
-# Test
+# Run tests
 make test
 
-# Clean
+# Clean build artifacts
 make clean
 ```
+
+### Cross-Platform Builds
+
+Build for all supported platforms:
+
+```bash
+# Build for all platforms (Linux, macOS, Windows)
+make build-all
+
+# Or build for specific platforms
+make build-linux          # Linux amd64
+make build-linux-arm64    # Linux arm64 (Raspberry Pi, etc.)
+make build-darwin         # macOS Intel
+make build-darwin-arm64   # macOS Apple Silicon
+make build-windows        # Windows amd64
+```
+
+### Docker Builds
+
+Build without installing Go locally:
+
+```bash
+# Build using Docker (outputs Linux amd64 binary)
+make docker-build
+
+# Build Docker image
+make docker-image
+
+# Run in Docker container
+make docker-run
+
+# Build for specific platform using Docker
+./scripts/docker-build.sh linux arm64 v1.0.0
+./scripts/docker-build.sh darwin amd64 v1.0.0
+```
+
+### Release
+
+Create release artifacts for all platforms:
+
+```bash
+# Build all platforms and create .tar.gz/.zip archives
+make release VERSION=v1.0.0
+```
+
+Output binaries are placed in the `dist/` directory.
 
 ## Project Structure
 
