@@ -134,6 +134,9 @@ type Model struct {
 	groupedView    bool            // toggle with 'p' key
 	expandedGroups map[string]bool // group name → expanded
 
+	// Connection throttling
+	connTickCounter int // counts ticks; collect connections every 3rd tick
+
 	// Query/search state
 	queryMode    bool            // true when in query mode
 	queryType    QueryType       // search vs filter
@@ -150,15 +153,16 @@ func New() Model {
 	ti.CharLimit = 256
 
 	return Model{
-		collector:      metrics.NewCollector(),
-		cpuHistory:     NewHistory(historyCapacity),
-		sendHistory:    NewHistory(historyCapacity),
-		recvHistory:    NewHistory(historyCapacity),
-		width:          80,
-		height:         24,
-		connCounts:     map[int32]int{},
-		expandedGroups: make(map[string]bool),
-		queryInput:     ti,
+		collector:       metrics.NewCollector(),
+		cpuHistory:      NewHistory(historyCapacity),
+		sendHistory:     NewHistory(historyCapacity),
+		recvHistory:     NewHistory(historyCapacity),
+		width:           80,
+		height:          24,
+		connCounts:      map[int32]int{},
+		connTickCounter: 2, // trigger connection collection on first tick
+		expandedGroups:  make(map[string]bool),
+		queryInput:      ti,
 	}
 }
 
@@ -192,7 +196,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Clean up expanded groups that no longer exist
 		m.cleanupExpandedGroups()
-		cmds := []tea.Cmd{tickCmd(), collectConnCountsCmd()}
+		cmds := []tea.Cmd{tickCmd()}
+		// Collect connections every 3rd tick (~6 seconds) to reduce syscalls
+		m.connTickCounter++
+		if m.connTickCounter >= 3 {
+			m.connTickCounter = 0
+			cmds = append(cmds, collectConnCountsCmd())
+		}
 		if m.csvLogging && m.csvLogPath != "" {
 			cmds = append(cmds, csvWriteCmd(m.snapshot, m.connCounts, m.csvLogPath, false))
 		}

@@ -66,11 +66,14 @@ type Collector struct {
 	prevBytesRecv uint64
 	prevTime      time.Time
 	initialized   bool
+	procCollector *ProcessCollector
 }
 
 // NewCollector returns an initialized Collector.
 func NewCollector() *Collector {
-	return &Collector{}
+	return &Collector{
+		procCollector: NewProcessCollector(),
+	}
 }
 
 // Collect gathers a full system metrics Snapshot.
@@ -97,7 +100,7 @@ func (c *Collector) Collect() (Snapshot, error) {
 		return Snapshot{}, err
 	}
 
-	procs, _ := collectProcesses(25)
+	procs, _ := c.procCollector.CollectAll()
 
 	hostname, osInfo, uptime := collectHostInfo()
 
