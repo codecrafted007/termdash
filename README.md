@@ -6,6 +6,70 @@ A modern, interactive terminal-based system monitor built with Go. Think `htop` 
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/Platform-macOS%20|%20Linux-lightgrey)
 
+## Why termdash?
+
+### The Problem
+
+You're debugging a production issue. CPU is spiking. You need to find all Java processes consuming more than 50% CPU that have active network connections. With traditional tools, you'd do something like:
+
+```bash
+ps aux | grep java | awk '$3 > 50' | while read line; do
+  pid=$(echo $line | awk '{print $2}')
+  netstat -tlnp 2>/dev/null | grep $pid
+done
+```
+
+Clunky. Error-prone. And by the time you've typed it, the moment has passed.
+
+### The Solution
+
+With termdash, you press `Q` and type:
+
+```
+name ~ java and cpu > 50 and conn > 0
+```
+
+**That's it.** Real-time, filtered results. No pipes. No awk. No context switching.
+
+### Motivation
+
+Every developer and sysadmin knows the drill: you're SSHed into a server, something's wrong, and you need answers *fast*. Traditional tools like `htop` are great for general monitoring, but when you need to find specific processes matching complex criteria, you end up juggling `ps`, `grep`, `awk`, and `netstat` in increasingly creative combinations.
+
+termdash was born from a simple idea: **what if your process monitor could speak your language?**
+
+Instead of memorizing command-line incantations, you describe what you're looking for:
+- "Show me all processes owned by root with more than 5 connections"
+- "Find anything using more than 10% CPU and 5% memory"
+- "Filter to just Python or Node.js processes"
+
+## What Makes termdash Different
+
+| Feature | htop | btop | gotop | **termdash** |
+|---------|------|------|-------|--------------|
+| Process filtering | Basic text search | Basic text search | None | **Full query DSL** |
+| Query language | ❌ | ❌ | ❌ | ✅ `cpu > 50 and name ~ java` |
+| Vim-style search | ❌ | ❌ | ❌ | ✅ Press `/` to search |
+| Process grouping | ❌ | ❌ | ❌ | ✅ Aggregate by name |
+| Per-process connections | ❌ | ❌ | ❌ | ✅ Built-in |
+| Export to JSON/CSV | ❌ | ❌ | ❌ | ✅ One keypress |
+| Process detail view | Limited | Limited | ❌ | ✅ Full inspection |
+| Sparkline history | ❌ | ✅ | ✅ | ✅ Per-process |
+| Written in | C | C++ | Go | **Go** |
+
+### Key Differentiators
+
+1. **Query DSL** — The killer feature. No other terminal monitor lets you write `user = root and conn > 0 and cpu > 10`. Filter processes like you query a database.
+
+2. **Vim-Style Workflow** — Press `/` for quick search, `j/k` to navigate, `Enter` to inspect. Feels like home for terminal users.
+
+3. **Process Grouping** — See 47 Chrome processes? Toggle grouping with `p` to see them as one entry with aggregate CPU/memory.
+
+4. **Connection Awareness** — Every process shows its network connection count. Filter by it. Sort by it. Essential for debugging networked applications.
+
+5. **Export Everything** — Press `e` for JSON snapshot, `E` to start recording CSV. Perfect for post-incident analysis or automation.
+
+6. **Modern Codebase** — Built with Go and the Charm ecosystem. Easy to understand, extend, and contribute to.
+
 ## Features
 
 - **Real-time Monitoring** — CPU, memory, swap, disk, and network metrics updated every 2 seconds
