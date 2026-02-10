@@ -5,17 +5,19 @@ import (
 	"sort"
 	"time"
 
+	"github.com/brajesh/termdash/internal/history"
 	"github.com/brajesh/termdash/internal/metrics"
 	"github.com/brajesh/termdash/internal/ui/panels"
+	"github.com/brajesh/termdash/pkg/dsl"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 const (
-	refreshInterval     = 2 * time.Second
-	detailTickInterval  = 1 * time.Second
-	historyCapacity     = 60
-	detailHistoryCap    = 60
+	defaultRefreshInterval = 2 * time.Second
+	detailTickInterval     = 1 * time.Second
+	historyCapacity        = 60
+	detailHistoryCap       = 60
 )
 
 // ViewState represents which view is active.
@@ -101,8 +103,9 @@ type statusClearMsg struct{}
 
 // Model is the root bubbletea model.
 type Model struct {
-	collector   *metrics.Collector
-	snapshot    metrics.Snapshot
+	config    *dsl.Config
+	collector *metrics.Collector
+	snapshot  metrics.Snapshot
 	cpuHistory  *History
 	sendHistory *History
 	recvHistory *History
@@ -145,15 +148,32 @@ type Model struct {
 	queryFilter  *FilterNode     // parsed filter (nil if invalid/empty)
 	queryError   string          // parse error message
 	filterLocked bool            // true when filter is applied but not editing
+
+	// History / replay state
+	historyStore      *history.Store // nil if history disabled
+	historyRetention  time.Duration  // parsed from config
+	historyInterval   time.Duration  // parsed from config
+	historyMaxProcs   int            // max processes per snapshot
+	replayMode        bool
+	replayIndex       int      // index into replayTimestamps
+	replayTimestamps  []int64  // loaded from DB
+	replaySnapshot    *metrics.Snapshot
+	replayConnCounts  map[int32]int
 }
 
-// New creates a new Model.
+// New creates a new Model with the default config.
 func New() Model {
+	return NewWithConfig(dsl.DefaultConfig())
+}
+
+// NewWithConfig creates a new Model using the given DSL config.
+func NewWithConfig(cfg *dsl.Config) Model {
 	ti := textinput.New()
 	ti.Prompt = ""
 	ti.CharLimit = 256
 
 	return Model{
+		config:          cfg,
 		collector:       metrics.NewCollector(),
 		cpuHistory:      NewHistory(historyCapacity),
 		sendHistory:     NewHistory(historyCapacity),
@@ -167,11 +187,37 @@ func New() Model {
 	}
 }
 
+// SetHistoryStore configures the model to use the given history store for
+// persistence and replay. Call this before running the program.
+func (m *Model) SetHistoryStore(store *history.Store, retention, interval time.Duration, maxProcs int) {
+	m.historyStore = store
+	m.historyRetention = retention
+	m.historyInterval = interval
+	m.historyMaxProcs = maxProcs
+}
+
+// refreshInterval returns the configured refresh interval, falling back to the default.
+func (m Model) refreshInterval() time.Duration {
+	if m.config != nil && m.config.Global != nil && m.config.Global.Refresh != "" {
+		if d, err := dsl.ParseDuration(m.config.Global.Refresh); err == nil {
+			return d
+		}
+	}
+	return defaultRefreshInterval
+}
+
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		collectSystemCmd(m.collector),
 		collectProcessesCmd(m.collector),
-	)
+	}
+	if m.historyStore != nil {
+		cmds = append(cmds,
+			history.WriteTick(m.historyInterval),
+			history.CleanupCmd(m.historyStore, m.historyRetention),
+		)
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -205,7 +251,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sendHistory.Push(m.snapshot.Network.SendRate)
 		m.recvHistory.Push(m.snapshot.Network.RecvRate)
 		m.ready = true
-		cmds := []tea.Cmd{tickCmd()}
+		cmds := []tea.Cmd{tickCmd(m.refreshInterval())}
 		// Collect connections every 3rd tick (~6 seconds) to reduce syscalls
 		m.connTickCounter++
 		if m.connTickCounter >= 3 {
@@ -282,9 +328,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMsg = ""
 		return m, nil
 
+	case history.WriteTickMsg:
+		if m.historyStore != nil && !m.replayMode && m.ready {
+			return m, tea.Batch(
+				history.WriteCmd(m.historyStore, m.snapshot, m.connCounts, m.historyMaxProcs),
+				history.WriteTick(m.historyInterval),
+			)
+		}
+		return m, history.WriteTick(m.historyInterval)
+
+	case history.WriteResultMsg:
+		// Log errors silently; don't crash.
+		return m, nil
+
+	case history.CleanupResultMsg:
+		return m, nil
+
+	case history.TimestampsLoadMsg:
+		if msg.Err != nil || len(msg.Timestamps) == 0 {
+			m.replayMode = false
+			m.statusMsg = "No history available"
+			return m, statusClearCmd(3 * time.Second)
+		}
+		m.replayTimestamps = msg.Timestamps
+		m.replayIndex = len(msg.Timestamps) - 1
+		return m, history.LoadSnapshotCmd(m.historyStore, msg.Timestamps[m.replayIndex])
+
+	case history.ReplayLoadMsg:
+		if msg.Err != nil || msg.Snap == nil {
+			return m, nil
+		}
+		m.replaySnapshot = msg.Snap
+		m.replayConnCounts = msg.ConnCounts
+		return m, nil
+
 	case errMsg:
 		m.err = msg
-		return m, tickCmd()
+		return m, tickCmd(m.refreshInterval())
 	}
 
 	return m, nil
@@ -301,6 +381,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlC:
 		return m, tea.Quit
 	case tea.KeyEsc:
+		// Exit replay mode
+		if m.replayMode {
+			m.replayMode = false
+			m.replaySnapshot = nil
+			m.replayConnCounts = nil
+			m.replayTimestamps = nil
+			return m, nil
+		}
 		// Handle Esc for detail view
 		if m.viewState == ViewProcessDetail {
 			m.viewState = ViewDashboard
@@ -329,6 +417,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "?":
 		m.showHelp = !m.showHelp
 		return m, nil
+	}
+
+	// Replay mode keys
+	if m.replayMode {
+		return m.handleReplayKey(key)
 	}
 
 	switch m.viewState {
@@ -418,6 +511,9 @@ func (m Model) handleDashboardKey(key string) (tea.Model, tea.Cmd) {
 		m.queryError = ""
 		m.filterLocked = false
 		return m, textinput.Blink
+
+	case "t":
+		return m.enterReplayMode()
 	}
 
 	return m, nil
@@ -475,6 +571,79 @@ func (m Model) handleDetailKey(key string) (tea.Model, tea.Cmd) {
 	case "E":
 		return m.toggleCSVLogging()
 	}
+	return m, nil
+}
+
+func (m Model) enterReplayMode() (tea.Model, tea.Cmd) {
+	if m.historyStore == nil {
+		m.statusMsg = "History disabled"
+		return m, statusClearCmd(3 * time.Second)
+	}
+	m.replayMode = true
+	now := time.Now()
+	from := now.Add(-m.historyRetention).UnixMilli()
+	to := now.UnixMilli()
+	return m, history.LoadTimestampsCmd(m.historyStore, from, to)
+}
+
+func (m Model) handleReplayKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "t":
+		// Exit replay mode
+		m.replayMode = false
+		m.replaySnapshot = nil
+		m.replayConnCounts = nil
+		m.replayTimestamps = nil
+		return m, nil
+
+	case "[", "left":
+		// Step back one snapshot
+		if m.replayIndex > 0 {
+			m.replayIndex--
+			return m, history.LoadSnapshotCmd(m.historyStore, m.replayTimestamps[m.replayIndex])
+		}
+		return m, nil
+
+	case "]", "right":
+		// Step forward one snapshot
+		if m.replayIndex < len(m.replayTimestamps)-1 {
+			m.replayIndex++
+			return m, history.LoadSnapshotCmd(m.historyStore, m.replayTimestamps[m.replayIndex])
+		}
+		return m, nil
+
+	case "{":
+		// Jump back ~1 minute (6 snapshots at 10s interval)
+		m.replayIndex -= 6
+		if m.replayIndex < 0 {
+			m.replayIndex = 0
+		}
+		return m, history.LoadSnapshotCmd(m.historyStore, m.replayTimestamps[m.replayIndex])
+
+	case "}":
+		// Jump forward ~1 minute
+		m.replayIndex += 6
+		if m.replayIndex >= len(m.replayTimestamps) {
+			m.replayIndex = len(m.replayTimestamps) - 1
+		}
+		return m, history.LoadSnapshotCmd(m.historyStore, m.replayTimestamps[m.replayIndex])
+
+	case "j", "down":
+		rowCount := m.displayRowCount()
+		if m.cursor < rowCount-1 {
+			m.cursor++
+		}
+		m.ensureCursorVisible()
+		return m, nil
+
+	case "k", "up":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+		m.ensureCursorVisible()
+		return m, nil
+	}
+
 	return m, nil
 }
 
@@ -574,9 +743,10 @@ func (m Model) filteredProcesses() []metrics.ProcessInfo {
 		return procs
 	}
 
+	conns := m.activeConnCounts()
 	var filtered []metrics.ProcessInfo
 	for _, p := range procs {
-		connCount := m.connCounts[p.PID]
+		connCount := conns[p.PID]
 		if m.matchesFilter(p, connCount) {
 			filtered = append(filtered, p)
 		}
@@ -638,12 +808,14 @@ func (m Model) visibleRows() int {
 }
 
 func (m Model) sortedProcesses() []metrics.ProcessInfo {
-	procs := make([]metrics.ProcessInfo, len(m.snapshot.Processes))
-	copy(procs, m.snapshot.Processes)
+	snap := m.activeSnapshot()
+	conns := m.activeConnCounts()
+	procs := make([]metrics.ProcessInfo, len(snap.Processes))
+	copy(procs, snap.Processes)
 
 	// Apply connection counts
 	for i := range procs {
-		if c, ok := m.connCounts[procs[i].PID]; ok {
+		if c, ok := conns[procs[i].PID]; ok {
 			procs[i].ConnCount = c
 		}
 	}
@@ -685,7 +857,7 @@ func (m Model) displayRowCount() int {
 // displayRows builds the display rows for grouped view.
 func (m Model) displayRows() []DisplayRow {
 	procs := m.filteredProcesses()
-	groups := GroupProcesses(procs, m.connCounts)
+	groups := GroupProcesses(procs, m.activeConnCounts())
 	return BuildDisplayRows(groups, m.expandedGroups, m.sortColumn, m.sortAscending)
 }
 
@@ -724,11 +896,31 @@ func (m Model) View() string {
 	}
 }
 
+func (m Model) activeSnapshot() metrics.Snapshot {
+	if m.replayMode && m.replaySnapshot != nil {
+		return *m.replaySnapshot
+	}
+	return m.snapshot
+}
+
+func (m Model) activeConnCounts() map[int32]int {
+	if m.replayMode && m.replayConnCounts != nil {
+		return m.replayConnCounts
+	}
+	return m.connCounts
+}
+
 func (m Model) renderDashboardView() string {
 	width := m.width
 
-	header := panels.RenderHeader(m.snapshot, m.csvLogging, m.statusMsg)
-	summary := panels.RenderSummary(m.snapshot, width)
+	snap := m.activeSnapshot()
+
+	var header string
+	if m.replayMode {
+		header = m.renderReplayHeader(snap)
+	} else {
+		header = panels.RenderHeader(snap, m.csvLogging, m.statusMsg)
+	}
 
 	procs := m.filteredProcesses()
 	visible := m.visibleRows()
@@ -738,10 +930,32 @@ func (m Model) renderDashboardView() string {
 		visible--
 	}
 
+	// Render query bar
+	queryBar := ""
+	if m.queryMode || m.filterLocked {
+		queryBar = panels.RenderQueryBar(
+			panels.QueryType(m.queryType),
+			m.queryInput,
+			m.queryError,
+			m.filterLocked,
+			width,
+		)
+	}
+
+	help := panels.RenderHelp(m.showHelp, false)
+
+	// Use config-driven layout when a layout config is present.
+	if m.config != nil && m.config.Layout != nil {
+		widgets := m.renderWidgets(procs, visible)
+		return RenderConfigLayout(m.config.Layout, width, m.height, widgets, header, queryBar, help)
+	}
+
+	// Fallback: legacy hardcoded layout.
+	summary := panels.RenderSummary(snap, width)
+
 	// Collapse netTop if terminal is too small
 	showNetTop := visible >= 5
 	if !showNetTop {
-		// Reclaim 2 rows from netTop
 		visible += 2
 	}
 
@@ -781,33 +995,90 @@ func (m Model) renderDashboardView() string {
 		)
 	} else {
 		processTable = panels.RenderProcessTable(
-			procs, m.connCounts,
+			procs, m.activeConnCounts(),
 			m.cursor, m.scrollOffset, visible,
 			panels.SortColumn(m.sortColumn), m.sortAscending,
 			width,
 		)
 	}
 
-	// Render query bar
-	queryBar := ""
-	if m.queryMode || m.filterLocked {
-		queryBar = panels.RenderQueryBar(
-			panels.QueryType(m.queryType),
-			m.queryInput,
-			m.queryError,
-			m.filterLocked,
-			width,
-		)
-	}
-
 	netTop := ""
 	if showNetTop {
-		netTop = panels.RenderNetTop(procs, m.connCounts, m.snapshot, width)
+		netTop = panels.RenderNetTop(procs, m.activeConnCounts(), snap, width)
 	}
 
-	help := panels.RenderHelp(m.showHelp, false)
-
 	return RenderDashboardLayout(width, m.height, header, summary, processTable, queryBar, netTop, help)
+}
+
+// renderWidgets returns render functions for each widget, called with the actual column width.
+func (m Model) renderWidgets(procs []metrics.ProcessInfo, visible int) map[string]WidgetRenderer {
+	snap := m.activeSnapshot()
+	conns := m.activeConnCounts()
+	widgets := make(map[string]WidgetRenderer)
+
+	widgets["summary"] = func(w int) string {
+		return panels.RenderSummary(snap, w)
+	}
+
+	widgets["cpu"] = func(w int) string {
+		return panels.RenderCPU(snap, m.cpuHistory.Values(), w)
+	}
+
+	widgets["memory"] = func(w int) string {
+		return panels.RenderMemory(snap, w)
+	}
+
+	widgets["nettop"] = func(w int) string {
+		return panels.RenderNetTop(procs, conns, snap, w)
+	}
+
+	if m.groupedView {
+		rows := m.displayRows()
+		tableRows := make([]panels.TableRow, len(rows))
+		for i, r := range rows {
+			tableRows[i] = panels.TableRow{
+				IsGroup:  r.IsGroup,
+				Expanded: r.Expanded,
+				Depth:    r.Depth,
+			}
+			if r.IsGroup && r.Group != nil {
+				tableRows[i].PID = fmt.Sprintf("(%d)", len(r.Group.Processes))
+				tableRows[i].Name = r.Group.Name
+				tableRows[i].User = r.Group.User
+				tableRows[i].CPUPercent = r.Group.CPUPercent
+				tableRows[i].MemPercent = float64(r.Group.MemPercent)
+				tableRows[i].MemRSS = r.Group.MemRSS
+				tableRows[i].ConnCount = r.Group.ConnCount
+			} else if r.Process != nil {
+				tableRows[i].PID = fmt.Sprintf("%d", r.Process.PID)
+				tableRows[i].Name = r.Process.Name
+				tableRows[i].User = r.Process.User
+				tableRows[i].CPUPercent = r.Process.CPUPercent
+				tableRows[i].MemPercent = float64(r.Process.MemPercent)
+				tableRows[i].MemRSS = r.Process.MemRSS
+				tableRows[i].ConnCount = r.Process.ConnCount
+			}
+		}
+		widgets["procs"] = func(w int) string {
+			return panels.RenderGroupedProcessTable(
+				tableRows,
+				m.cursor, m.scrollOffset, visible,
+				panels.SortColumn(m.sortColumn), m.sortAscending,
+				w,
+			)
+		}
+	} else {
+		widgets["procs"] = func(w int) string {
+			return panels.RenderProcessTable(
+				procs, conns,
+				m.cursor, m.scrollOffset, visible,
+				panels.SortColumn(m.sortColumn), m.sortAscending,
+				w,
+			)
+		}
+	}
+
+	return widgets
 }
 
 func (m Model) renderDetailView() string {
@@ -827,9 +1098,38 @@ func (m Model) renderDetailView() string {
 	return RenderDetailLayout(width, m.height, detailView, help)
 }
 
-// tickCmd sends a tick after the refresh interval.
-func tickCmd() tea.Cmd {
-	return tea.Tick(refreshInterval, func(t time.Time) tea.Msg {
+// renderReplayHeader renders the replay-mode header with timeline indicator.
+func (m Model) renderReplayHeader(snap metrics.Snapshot) string {
+	nowTS := time.Now().UnixMilli()
+	var replayTS int64
+	if len(m.replayTimestamps) > 0 && m.replayIndex < len(m.replayTimestamps) {
+		replayTS = m.replayTimestamps[m.replayIndex]
+	}
+
+	offset := history.FormatReplayOffset(replayTS, nowTS)
+	timeStr := snap.Timestamp.Format("15:04:05")
+
+	// Build timeline bar.
+	barWidth := 20
+	pos := 0
+	if len(m.replayTimestamps) > 1 {
+		pos = m.replayIndex * (barWidth - 1) / (len(m.replayTimestamps) - 1)
+	}
+	bar := make([]byte, barWidth)
+	for i := range bar {
+		if i == pos {
+			bar[i] = '#'
+		} else {
+			bar[i] = '-'
+		}
+	}
+
+	return fmt.Sprintf("  REPLAY  %s  [%s]  %s   Press Esc to exit", offset, string(bar), timeStr)
+}
+
+// tickCmd sends a tick after the given refresh interval.
+func tickCmd(interval time.Duration) tea.Cmd {
+	return tea.Tick(interval, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }

@@ -12,7 +12,7 @@ func RenderHelp(showHelp bool, inDetail bool) string {
 		if inDetail {
 			return styles.HelpDescStyle.Render(" Esc:back  e:export  ?:help  q:quit")
 		}
-		return styles.HelpDescStyle.Render(" j/k:move  /:search  Q:query  s:sort  p:group  e:export  ?:help  q:quit")
+		return styles.HelpDescStyle.Render(" j/k:move  /:search  Q:query  s:sort  p:group  t:replay  e:export  ?:help  q:quit")
 	}
 
 	var keys []struct{ key, desc string }
@@ -35,6 +35,7 @@ func RenderHelp(showHelp bool, inDetail bool) string {
 			{"S", "Toggle sort direction"},
 			{"g/G", "Top/bottom"},
 			{"p", "Toggle process grouping"},
+			{"t", "Replay history"},
 			{"e", "Export JSON snapshot"},
 			{"E", "Toggle CSV recording"},
 			{"?", "Toggle help"},

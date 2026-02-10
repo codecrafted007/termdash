@@ -52,6 +52,7 @@ Instead of memorizing command-line incantations, you describe what you're lookin
 | Process grouping | ❌ | ❌ | ❌ | ✅ Aggregate by name |
 | Per-process connections | ❌ | ❌ | ❌ | ✅ Built-in |
 | Export to JSON/CSV | ❌ | ❌ | ❌ | ✅ One keypress |
+| Historical replay | ❌ | ❌ | ❌ | ✅ SQLite-backed, scroll through past snapshots |
 | Process detail view | Limited | Limited | ❌ | ✅ Full inspection |
 | Sparkline history | ❌ | ✅ | ✅ | ✅ Per-process |
 | Written in | C | C++ | Go | **Go** |
@@ -68,7 +69,9 @@ Instead of memorizing command-line incantations, you describe what you're lookin
 
 5. **Export Everything** — Press `e` for JSON snapshot, `E` to start recording CSV. Perfect for post-incident analysis or automation.
 
-6. **Modern Codebase** — Built with Go and the Charm ecosystem. Easy to understand, extend, and contribute to.
+6. **Historical Replay** — Snapshots are saved to a local SQLite database every 10 seconds. Press `t` to enter replay mode and scroll through past system state. Investigate CPU spikes and memory leaks after they've passed.
+
+7. **Modern Codebase** — Built with Go and the Charm ecosystem. Easy to understand, extend, and contribute to.
 
 ## Features
 
@@ -79,6 +82,7 @@ Instead of memorizing command-line incantations, you describe what you're lookin
 - **Network Connections** — Per-process connection counts at a glance
 - **Powerful Query System** — Filter processes using simple search or a full query DSL
 - **Export Capabilities** — Export snapshots to JSON or record continuous data to CSV
+- **Historical Replay** — SQLite-backed snapshot history with time-travel replay mode
 
 ## Installation
 
@@ -103,6 +107,117 @@ go install github.com/codecrafted007/termdash/cmd/termdash@latest
 termdash
 ```
 
+### Configuration
+
+termdash supports a `.td` config file to customize the dashboard layout and refresh rate. By default it looks for `~/.config/termdash/config.td`.
+
+```bash
+# Use default config path
+termdash
+
+# Use a specific config file
+termdash --config ./my-config.td
+termdash -c ./my-config.td
+```
+
+#### Config Format
+
+Config files use HCL syntax with `global` settings and a `layout` grid of rows and columns:
+
+```hcl
+global {
+  refresh = "1s"
+  title   = "dev"
+}
+
+layout {
+  row {
+    weight = 1
+    col {
+      weight = 1
+      widget = "cpu"
+    }
+    col {
+      weight = 1
+      widget = "memory"
+    }
+  }
+  row {
+    weight = 3
+    col {
+      weight = 1
+      widget = "procs"
+    }
+  }
+}
+```
+
+- **`refresh`** — How often metrics update (`"1s"`, `"2s"`, `"500ms"`, etc.)
+- **`title`** — Dashboard title shown in the header
+- **`weight`** — Proportional size of rows/columns (higher = larger)
+- **`widget`** — Which panel to render: `"cpu"`, `"memory"`, `"summary"`, `"procs"`, `"nettop"`
+
+#### History and Replay Settings
+
+termdash records system snapshots to a local SQLite database, enabling you to replay past system state. This is configured in the `global {}` block:
+
+```hcl
+global {
+  refresh          = "2s"
+  title            = "dev"
+  history          = "24h"    # how long to keep data. "0" disables history entirely.
+  history_interval = "10s"    # how often to write a snapshot to the DB
+  history_procs    = 50       # max processes per snapshot (by CPU). 0 = all.
+  db_path          = ""       # custom DB path. default: ~/.local/share/termdash/history.db
+}
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `history` | `"24h"` | Retention period. Accepts any Go duration (`"24h"`, `"168h"` for 7 days). Set to `"0"` to disable history completely — no DB file will be created. |
+| `history_interval` | `"10s"` | Write frequency. Lower values give finer replay resolution but use more disk. Minimum `"2s"`. |
+| `history_procs` | `50` | Max processes stored per snapshot, sorted by CPU usage. Set to `0` to store all processes. |
+| `db_path` | `""` | Path to the SQLite database file. When empty (default), uses `~/.local/share/termdash/history.db`. The directory is created automatically. |
+
+**Storage usage:** With defaults (10s interval, 50 processes, 24h retention), the database uses approximately **25 MB per day**.
+
+#### Available Widgets
+
+| Widget | Description |
+|--------|-------------|
+| `cpu` | CPU usage with per-core breakdown and sparkline |
+| `memory` | Memory and swap usage bars |
+| `summary` | Combined CPU, memory, and swap overview |
+| `procs` | Interactive process table (sort, search, inspect) |
+| `nettop` | Network I/O rates and top talkers |
+
+#### Preset Configs
+
+Ready-to-use configs are included in `configs/`. Copy one or use it directly:
+
+```bash
+# Developer — CPU + Memory on top, large process table. 1s refresh.
+termdash -c configs/dev.td
+
+# Ops / SysAdmin — Balanced 3-panel top row, procs + nettop below. 2s refresh.
+termdash -c configs/ops.td
+
+# Minimal — Just the process table, nothing else. 3s refresh.
+termdash -c configs/minimal.td
+
+# Network — Network top panel + summary on top, processes below. 1s refresh.
+termdash -c configs/network.td
+```
+
+To make one your default:
+
+```bash
+mkdir -p ~/.config/termdash
+cp configs/dev.td ~/.config/termdash/config.td
+```
+
+If no config file exists, termdash uses a built-in default layout (summary + nettop on top, procs on bottom, 2s refresh).
+
 ### Keyboard Shortcuts
 
 #### Dashboard View
@@ -119,10 +234,24 @@ termdash
 | `p` | Toggle process grouping |
 | `/` | Search by name or PID |
 | `Q` | Open query filter (DSL) |
+| `t` | Enter replay mode |
 | `e` | Export snapshot to JSON |
 | `E` | Toggle CSV recording |
 | `?` | Toggle help |
 | `q` | Quit |
+
+#### Replay Mode
+
+Press `t` in the dashboard to enter replay mode. The header changes to show a timeline position and the snapshot timestamp.
+
+| Key | Action |
+|-----|--------|
+| `[` / `Left` | Step back one snapshot (~10s) |
+| `]` / `Right` | Step forward one snapshot |
+| `{` | Jump back ~1 minute |
+| `}` | Jump forward ~1 minute |
+| `j` / `k` | Navigate process table within the snapshot |
+| `Esc` / `t` | Exit replay, return to live view |
 
 #### Process Detail View
 
@@ -221,6 +350,7 @@ mem > 5 and cpu > 10              # Memory and CPU intensive processes
 - **[Lipgloss](https://github.com/charmbracelet/lipgloss)** — Style definitions
 - **[ntcharts](https://github.com/NimbleMarkets/ntcharts)** — Terminal sparkline charts
 - **[gopsutil](https://github.com/shirou/gopsutil)** — Cross-platform system metrics
+- **[modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite)** — Pure-Go SQLite for history persistence (no CGO required)
 
 ## Building
 
@@ -291,7 +421,21 @@ Output binaries are placed in the `dist/` directory.
 ```
 termdash/
 ├── cmd/termdash/          # Application entry point
+├── configs/               # Preset .td config files
+│   ├── dev.td             # Developer layout
+│   ├── ops.td             # Ops/SysAdmin layout
+│   ├── minimal.td         # Minimal (procs only)
+│   └── network.td         # Network-focused layout
+├── pkg/dsl/               # Config DSL parser (HCL-based)
+│   ├── config.go          # Config structs with HCL tags
+│   ├── parser.go          # HCL file parsing + LoadConfig
+│   ├── defaults.go        # Default config (fallback)
+│   └── validate.go        # Config validation
 ├── internal/
+│   ├── history/           # SQLite-backed snapshot persistence
+│   │   ├── store.go       # DB open/close, write/read/cleanup
+│   │   ├── writer.go      # Bubble Tea Cmd helpers
+│   │   └── store_test.go  # Store tests
 │   ├── metrics/           # System metrics collection
 │   │   ├── collector.go   # Main collector orchestration
 │   │   ├── cpu.go         # CPU metrics
@@ -304,12 +448,13 @@ termdash/
 │   └── ui/
 │       ├── model.go       # Bubbletea model (state machine)
 │       ├── query.go       # Query parser and filter
-│       ├── layout.go      # Layout composition
+│       ├── layout.go      # Layout composition (config-driven)
 │       ├── panels/        # UI panel renderers
 │       └── styles/        # Color palette and styles
 └── docs/
     ├── HLD.md             # High-level design
-    └── LLD.md             # Low-level design
+    ├── LLD.md             # Low-level design
+    └── DSL_SPEC.md        # DSL config language spec
 ```
 
 ## Requirements

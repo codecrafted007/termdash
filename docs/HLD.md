@@ -382,3 +382,146 @@ termdash/
 - **Environment variable display**: Detail view shows process environment variables, which may contain secrets. This is equivalent to `ps eww` or `/proc/PID/environ` — read-access is governed by OS permissions.
 - **No network listeners**: termdash is a purely local, read-only monitoring tool. It opens no sockets.
 - **Truncation guards**: Environment variables are truncated to 200 chars and capped at 50 entries. Cmdline is truncated to terminal width. This prevents memory exhaustion from adversarial process names.
+
+---
+
+## 13. Historical Replay and SQLite Persistence
+
+### 13.1 Motivation
+
+Without persistence, once a CPU spike or memory anomaly passes, it's gone. termdash now records system snapshots to a local SQLite database so users can replay past state and investigate incidents after the fact.
+
+### 13.2 Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Bubbletea Model                          │
+│                                                              │
+│  WriteTickMsg (every history_interval)                       │
+│       │                                                      │
+│       ▼                                                      │
+│  WriteCmd(store, snapshot, connCounts, maxProcs)             │
+│       │                                                      │
+│       ▼                                                      │
+│  ┌──────────────────────────────────────────────────┐       │
+│  │              history.Store                        │       │
+│  │  ┌────────────┐  ┌────────┐  ┌──────────┐       │       │
+│  │  │ snapshots  │  │ disks  │  │processes │       │       │
+│  │  │ (system)   │  │ (per   │  │(top N by │       │       │
+│  │  │            │  │  mount)│  │  CPU%)   │       │       │
+│  │  └────────────┘  └────────┘  └──────────┘       │       │
+│  │       SQLite (WAL mode, pure Go via modernc.org) │       │
+│  └──────────────────────────────────────────────────┘       │
+│                                                              │
+│  CleanupCmd (on startup, deletes rows older than retention)  │
+│                                                              │
+│  Replay Mode:                                                │
+│  LoadTimestampsCmd → TimestampsLoadMsg                       │
+│  LoadSnapshotCmd   → ReplayLoadMsg                           │
+│       │                                                      │
+│       ▼                                                      │
+│  replaySnapshot replaces m.snapshot in View()                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 13.3 Storage Schema
+
+Three tables with CASCADE deletes from the parent `snapshots` table:
+
+| Table | Content | Rows per snapshot |
+|-------|---------|-------------------|
+| `snapshots` | CPU, memory, swap, network, hostname, OS, uptime | 1 |
+| `disks` | Per-mount-point usage | ~3 |
+| `processes` | Top N processes by CPU (PID, name, user, CPU%, MEM%, RSS, conn count) | Up to `history_procs` (default 50) |
+
+Pragmas: `journal_mode=WAL`, `synchronous=NORMAL`, `foreign_keys=ON`.
+
+### 13.4 Storage Budget
+
+Default settings: write every 10s, store top 50 processes, retain 24h.
+
+| Component | Per snapshot | 24h (8,640 snapshots) |
+|-----------|-------------|----------------------|
+| System metrics (1 row) | ~200 bytes | 1.7 MB |
+| Disk metrics (~3 rows) | ~180 bytes | 1.5 MB |
+| Processes (50 rows) | ~2,500 bytes | 21.6 MB |
+| **Total** | **~2.9 KB** | **~25 MB** |
+
+### 13.5 Database Location
+
+| Scenario | Path |
+|----------|------|
+| **Default** | `~/.local/share/termdash/history.db` |
+| **Custom** | Set `db_path` in the `global {}` block of your `.td` config |
+| **Disabled** | Set `history = "0"` — no database file is created |
+
+The directory is created automatically on first run if it does not exist.
+
+To override the default location:
+
+```hcl
+global {
+  db_path = "/tmp/termdash-history.db"
+}
+```
+
+### 13.6 Configuration
+
+New fields in the `global {}` block:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `history` | `"24h"` | Retention period. Go duration (`"24h"`, `"7d"`, `"168h"`). Set to `"0"` to disable. |
+| `history_interval` | `"10s"` | How often a snapshot is written to the DB. Minimum `"2s"`. |
+| `history_procs` | `50` | Max processes stored per snapshot (sorted by CPU). `0` = all. |
+| `db_path` | `""` | Custom DB file path. Empty = default (`~/.local/share/termdash/history.db`). |
+
+### 13.7 Replay Mode
+
+Replay mode lets users scroll through historical snapshots using the same dashboard interface.
+
+**Entering:** Press `t` in the dashboard view. termdash loads all snapshot timestamps within the retention window and jumps to the most recent one.
+
+**Navigation:**
+
+| Key | Action |
+|-----|--------|
+| `[` / `Left` | Step back one snapshot (~10s) |
+| `]` / `Right` | Step forward one snapshot |
+| `{` | Jump back ~1 minute |
+| `}` | Jump forward ~1 minute |
+| `j` / `k` | Navigate the process table within the snapshot |
+| `Esc` / `t` | Exit replay, return to live view |
+
+**Header:** The normal header is replaced with a replay indicator showing the time offset, a timeline position bar, and the snapshot timestamp:
+
+```
+  REPLAY  -3m 20s  [-------#------------]  14:29:40   Press Esc to exit
+```
+
+**Data flow during replay:** `activeSnapshot()` and `activeConnCounts()` return replay data instead of live data. All rendering (summary, process table, nettop, widgets) uses these accessors, so the entire dashboard reflects the historical state.
+
+### 13.8 Elm Architecture Compliance
+
+All history I/O is performed through Bubble Tea `Cmd` functions — no goroutines are spawned directly:
+
+| Cmd | Msg returned | Trigger |
+|-----|-------------|---------|
+| `WriteTick` | `WriteTickMsg` | Fires at `history_interval` |
+| `WriteCmd` | `WriteResultMsg` | On each write tick (if live mode + ready) |
+| `CleanupCmd` | `CleanupResultMsg` | Once on startup |
+| `LoadTimestampsCmd` | `TimestampsLoadMsg` | On entering replay mode |
+| `LoadSnapshotCmd` | `ReplayLoadMsg` | On each replay navigation step |
+
+### 13.9 Error Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| DB file cannot be opened (permissions, disk full) | Warning printed to stderr; app runs without history |
+| Write fails mid-session | `WriteResultMsg.Err` is non-nil; silently ignored, next tick retries |
+| No history data when pressing `t` | Status message "No history available" shown for 3s |
+| DB path directory doesn't exist | Created automatically by `os.MkdirAll` |
+
+### 13.10 Dependency
+
+`modernc.org/sqlite` — a pure-Go SQLite implementation. No CGO or C compiler required beyond what the project already needs for gopsutil on macOS.
