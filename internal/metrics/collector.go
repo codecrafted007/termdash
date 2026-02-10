@@ -1,6 +1,9 @@
 package metrics
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // CPUMetrics holds per-core and total CPU usage.
 type CPUMetrics struct {
@@ -60,6 +63,19 @@ type Snapshot struct {
 	UptimeSeconds int64          `json:"uptime_seconds"`
 }
 
+// SystemSnapshot is a point-in-time collection of system metrics (excluding processes).
+type SystemSnapshot struct {
+	Timestamp     time.Time      `json:"timestamp"`
+	CPU           CPUMetrics     `json:"cpu"`
+	Memory        MemoryMetrics  `json:"memory"`
+	Disks         []DiskMetrics  `json:"disks"`
+	Network       NetworkMetrics `json:"network"`
+	Hostname      string         `json:"hostname"`
+	OS            string         `json:"os"`
+	Uptime        time.Duration  `json:"-"`
+	UptimeSeconds int64          `json:"uptime_seconds"`
+}
+
 // Collector gathers system metrics and tracks previous values for rate calculations.
 type Collector struct {
 	prevBytesSent uint64
@@ -76,44 +92,94 @@ func NewCollector() *Collector {
 	}
 }
 
-// Collect gathers a full system metrics Snapshot.
-func (c *Collector) Collect() (Snapshot, error) {
+// CollectSystem gathers system-level metrics (CPU, memory, disks, host info)
+// in parallel via goroutines, with network collected on the calling goroutine
+// (stateful: tracks previous byte counts for rate calculation).
+func (c *Collector) CollectSystem() (SystemSnapshot, error) {
 	now := time.Now()
 
-	cpuMetrics, err := collectCPU()
-	if err != nil {
-		return Snapshot{}, err
+	var (
+		cpuMetrics  CPUMetrics
+		memMetrics  MemoryMetrics
+		diskMetrics []DiskMetrics
+		hostname    string
+		osInfo      string
+		uptime      time.Duration
+		cpuErr      error
+		memErr      error
+		diskErr     error
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	go func() {
+		defer wg.Done()
+		cpuMetrics, cpuErr = collectCPU()
+	}()
+
+	go func() {
+		defer wg.Done()
+		memMetrics, memErr = collectMemory()
+	}()
+
+	go func() {
+		defer wg.Done()
+		diskMetrics, diskErr = collectDisks()
+		hostname, osInfo, uptime = collectHostInfo()
+	}()
+
+	// Network stays on the calling goroutine (stateful: reads/writes prevBytesSent etc.)
+	netMetrics, netErr := c.collectNetwork(now)
+
+	wg.Wait()
+
+	// Return first error encountered
+	for _, err := range []error{cpuErr, memErr, diskErr, netErr} {
+		if err != nil {
+			return SystemSnapshot{}, err
+		}
 	}
 
-	memMetrics, err := collectMemory()
-	if err != nil {
-		return Snapshot{}, err
-	}
-
-	diskMetrics, err := collectDisks()
-	if err != nil {
-		return Snapshot{}, err
-	}
-
-	netMetrics, err := c.collectNetwork(now)
-	if err != nil {
-		return Snapshot{}, err
-	}
-
-	procs, _ := c.procCollector.CollectAll()
-
-	hostname, osInfo, uptime := collectHostInfo()
-
-	return Snapshot{
+	return SystemSnapshot{
 		Timestamp:     now,
 		CPU:           cpuMetrics,
 		Memory:        memMetrics,
 		Disks:         diskMetrics,
 		Network:       netMetrics,
-		Processes:     procs,
 		Hostname:      hostname,
 		OS:            osInfo,
 		Uptime:        uptime,
 		UptimeSeconds: int64(uptime.Seconds()),
+	}, nil
+}
+
+// CollectProcesses gathers process metrics. Safe for concurrent use
+// (ProcessCollector is internally synchronized with a mutex).
+func (c *Collector) CollectProcesses() ([]ProcessInfo, error) {
+	return c.procCollector.CollectAll()
+}
+
+// Collect gathers a full system metrics Snapshot.
+// Kept for backward compatibility (tests, export).
+func (c *Collector) Collect() (Snapshot, error) {
+	sys, err := c.CollectSystem()
+	if err != nil {
+		return Snapshot{}, err
+	}
+
+	procs, _ := c.CollectProcesses()
+
+	return Snapshot{
+		Timestamp:     sys.Timestamp,
+		CPU:           sys.CPU,
+		Memory:        sys.Memory,
+		Disks:         sys.Disks,
+		Network:       sys.Network,
+		Processes:     procs,
+		Hostname:      sys.Hostname,
+		OS:            sys.OS,
+		Uptime:        sys.Uptime,
+		UptimeSeconds: sys.UptimeSeconds,
 	}, nil
 }

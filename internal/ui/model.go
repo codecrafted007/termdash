@@ -82,7 +82,8 @@ func (h *History) Values() []float64 {
 
 // Messages.
 type tickMsg time.Time
-type snapshotMsg metrics.Snapshot
+type systemMsg metrics.SystemSnapshot
+type processMsg []metrics.ProcessInfo
 type errMsg error
 type connCountMsg map[int32]int
 type processDetailMsg struct {
@@ -167,7 +168,10 @@ func New() Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(tickCmd(), collectCmd(m.collector))
+	return tea.Batch(
+		collectSystemCmd(m.collector),
+		collectProcessesCmd(m.collector),
+	)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -181,21 +185,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		return m, collectCmd(m.collector)
+		return m, tea.Batch(
+			collectSystemCmd(m.collector),
+			collectProcessesCmd(m.collector),
+		)
 
-	case snapshotMsg:
-		m.snapshot = metrics.Snapshot(msg)
+	case systemMsg:
+		sys := metrics.SystemSnapshot(msg)
+		m.snapshot.Timestamp = sys.Timestamp
+		m.snapshot.CPU = sys.CPU
+		m.snapshot.Memory = sys.Memory
+		m.snapshot.Disks = sys.Disks
+		m.snapshot.Network = sys.Network
+		m.snapshot.Hostname = sys.Hostname
+		m.snapshot.OS = sys.OS
+		m.snapshot.Uptime = sys.Uptime
+		m.snapshot.UptimeSeconds = sys.UptimeSeconds
 		m.cpuHistory.Push(m.snapshot.CPU.Total)
 		m.sendHistory.Push(m.snapshot.Network.SendRate)
 		m.recvHistory.Push(m.snapshot.Network.RecvRate)
 		m.ready = true
-		// Clamp cursor if display row count changed
-		rowCount := m.displayRowCount()
-		if m.cursor >= rowCount && rowCount > 0 {
-			m.cursor = rowCount - 1
-		}
-		// Clean up expanded groups that no longer exist
-		m.cleanupExpandedGroups()
 		cmds := []tea.Cmd{tickCmd()}
 		// Collect connections every 3rd tick (~6 seconds) to reduce syscalls
 		m.connTickCounter++
@@ -207,6 +216,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, csvWriteCmd(m.snapshot, m.connCounts, m.csvLogPath, false))
 		}
 		return m, tea.Batch(cmds...)
+
+	case processMsg:
+		m.snapshot.Processes = []metrics.ProcessInfo(msg)
+		// Clamp cursor if display row count changed
+		rowCount := m.displayRowCount()
+		if m.cursor >= rowCount && rowCount > 0 {
+			m.cursor = rowCount - 1
+		}
+		// Clean up expanded groups that no longer exist
+		m.cleanupExpandedGroups()
+		return m, nil
 
 	case connCountMsg:
 		m.connCounts = map[int32]int(msg)
@@ -814,14 +834,22 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-// collectCmd runs metrics collection in a goroutine.
-func collectCmd(c *metrics.Collector) tea.Cmd {
+// collectSystemCmd runs system metrics collection in a goroutine.
+func collectSystemCmd(c *metrics.Collector) tea.Cmd {
 	return func() tea.Msg {
-		snap, err := c.Collect()
+		sys, err := c.CollectSystem()
 		if err != nil {
 			return errMsg(err)
 		}
-		return snapshotMsg(snap)
+		return systemMsg(sys)
+	}
+}
+
+// collectProcessesCmd runs process metrics collection in a goroutine.
+func collectProcessesCmd(c *metrics.Collector) tea.Cmd {
+	return func() tea.Msg {
+		procs, _ := c.CollectProcesses()
+		return processMsg(procs)
 	}
 }
 

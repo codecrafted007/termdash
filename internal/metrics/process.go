@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"sort"
+	"sync"
 
 	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/shirou/gopsutil/v3/process"
@@ -10,6 +11,7 @@ import (
 // ProcessCollector caches gopsutil Process objects between ticks so that
 // Percent(0) can compute delta-based CPU% instead of lifetime averages.
 type ProcessCollector struct {
+	mu       sync.Mutex
 	cache    map[int32]*process.Process
 	totalMem uint64
 }
@@ -25,6 +27,9 @@ func NewProcessCollector() *ProcessCollector {
 // Cached *Process objects are reused so that Percent(0) can compute
 // accurate delta-based CPU%.
 func (pc *ProcessCollector) CollectAll() ([]ProcessInfo, error) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+
 	// Lazily fetch total memory once.
 	if pc.totalMem == 0 {
 		if vm, err := mem.VirtualMemory(); err == nil {
