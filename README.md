@@ -6,6 +6,8 @@ A modern, interactive terminal-based system monitor built with Go. Think `htop` 
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/Platform-macOS%20|%20Linux-lightgrey)
 
+![termdash demo](demo.gif)
+
 ## Why termdash?
 
 ### The Problem
