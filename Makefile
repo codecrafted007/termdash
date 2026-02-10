@@ -64,14 +64,14 @@ build-linux-arm64:
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GOBUILD) $(LDFLAGS) \
 		-o $(DIST_DIR)/$(BINARY)-linux-arm64 ./cmd/termdash
 
-# Build for macOS (amd64)
+# Build for macOS (amd64) — CGO required for gopsutil on darwin
 build-darwin:
-	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 $(GOBUILD) $(LDFLAGS) \
+	CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 $(GOBUILD) $(LDFLAGS) \
 		-o $(DIST_DIR)/$(BINARY)-darwin-amd64 ./cmd/termdash
 
-# Build for macOS ARM64 (Apple Silicon)
+# Build for macOS ARM64 (Apple Silicon) — CGO required for gopsutil on darwin
 build-darwin-arm64:
-	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 $(GOBUILD) $(LDFLAGS) \
+	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 $(GOBUILD) $(LDFLAGS) \
 		-o $(DIST_DIR)/$(BINARY)-darwin-arm64 ./cmd/termdash
 
 # Build for Windows

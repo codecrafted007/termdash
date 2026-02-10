@@ -70,7 +70,12 @@ for PLATFORM in "${PLATFORMS[@]}"; do
         GOARM="7"
     fi
 
-    CGO_ENABLED=0 GOOS=$OS GOARCH=$ARCH GOARM=$GOARM go build \
+    CGO_FLAG=0
+    if [ "$OS" == "darwin" ]; then
+        CGO_FLAG=1
+    fi
+
+    CGO_ENABLED=$CGO_FLAG GOOS=$OS GOARCH=$ARCH GOARM=$GOARM go build \
         -ldflags="-s -w -X main.version=${VERSION}" \
         -o "${OUTPUT_DIR}/${OUTPUT_NAME}" \
         ./cmd/termdash
