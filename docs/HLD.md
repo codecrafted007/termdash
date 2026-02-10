@@ -389,7 +389,17 @@ termdash/
 
 ### 13.1 Motivation
 
-Without persistence, once a CPU spike or memory anomaly passes, it's gone. termdash now records system snapshots to a local SQLite database so users can replay past state and investigate incidents after the fact.
+Every terminal monitor — htop, btop, gotop — is strictly live. The moment a CPU spike, memory leak, or runaway process passes, the evidence is gone. You're left saying "something happened 10 minutes ago" with nothing to show for it.
+
+This is a real problem:
+
+- **Post-incident analysis:** An alert fires at 3 AM. By the time you SSH in, the spike has subsided. What process caused it? What was memory doing? Traditional monitors can't answer that.
+- **Intermittent issues:** A process spikes CPU for 5 seconds every few minutes. You can't stare at the screen all day waiting to catch it. You need a record.
+- **Correlation:** Was the network spike related to the CPU spike? You need to see both at the same point in time, after the fact.
+
+No existing terminal monitor solves this. That's the gap.
+
+termdash records system snapshots to a local SQLite database at a configurable interval (default: every 10s). Users can press `t` to enter replay mode and scroll through past system state — same dashboard, same process table, same data — just from a different point in time. The cost is minimal (~25 MB/day with defaults), and it can be disabled entirely with `history = "0"`.
 
 ### 13.2 Architecture
 

@@ -52,7 +52,7 @@ Instead of memorizing command-line incantations, you describe what you're lookin
 | Process grouping | ❌ | ❌ | ❌ | ✅ Aggregate by name |
 | Per-process connections | ❌ | ❌ | ❌ | ✅ Built-in |
 | Export to JSON/CSV | ❌ | ❌ | ❌ | ✅ One keypress |
-| Historical replay | ❌ | ❌ | ❌ | ✅ SQLite-backed, scroll through past snapshots |
+| Historical replay | ❌ | ❌ | ❌ | ✅ SQLite-backed time travel (`t` to replay) |
 | Process detail view | Limited | Limited | ❌ | ✅ Full inspection |
 | Sparkline history | ❌ | ✅ | ✅ | ✅ Per-process |
 | Written in | C | C++ | Go | **Go** |
@@ -69,7 +69,7 @@ Instead of memorizing command-line incantations, you describe what you're lookin
 
 5. **Export Everything** — Press `e` for JSON snapshot, `E` to start recording CSV. Perfect for post-incident analysis or automation.
 
-6. **Historical Replay** — Snapshots are saved to a local SQLite database every 10 seconds. Press `t` to enter replay mode and scroll through past system state. Investigate CPU spikes and memory leaks after they've passed.
+6. **Historical Replay** — Every terminal monitor is strictly live — once a spike passes, the evidence is gone. termdash is different. It records snapshots to a local SQLite database every 10 seconds. Press `t` to enter replay mode and scroll through past system state. An alert fired at 3 AM? SSH in the morning and replay exactly what happened. Intermittent CPU spikes? Scroll back and catch every one. ~25 MB/day with defaults, zero config required.
 
 7. **Modern Codebase** — Built with Go and the Charm ecosystem. Easy to understand, extend, and contribute to.
 
